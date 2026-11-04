@@ -1,0 +1,14 @@
+# against ztconflo 39a9d2d (2026-10-28)
+diff --git a/ztconflo/build.py b/ztconflo/build.py
+index 4dffe79..12661df 100644
+--- a/ztconflo/build.py
++++ b/ztconflo/build.py
+@@ -33,7 +33,7 @@ def _pmbootstrap_config(work: Path, aports: Path, codename: str) -> Path:
+     cfg = work / "pmbootstrap.cfg"
+     cfg.parent.mkdir(parents=True, exist_ok=True)
+     cfg.write_text(f"[pmbootstrap]\naports = {aports}\ndevice = {codename}\nwork = {work}\n"
+-                   "ui = none\nuser = user\nkernel = \nis_default_channel = False\n")
++                   "ui = none\nuser = user\nkernel = " + __import__("os").environ.get("ZT_KERNEL", "") + "\nis_default_channel = False\n")
+     # what `pmbootstrap init` would have written; we never run init
+     version = work / "version"
+     if not version.is_file():

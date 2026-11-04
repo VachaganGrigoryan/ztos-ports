@@ -1,0 +1,8 @@
+#!/bin/sh
+# Mainline WCN3990 has no public BD address; derive a stable, locally-administered one from the board serial.
+serial=$(tr " " "\n" < /proc/cmdline | sed -n "s/^androidboot.serialno=//p")
+[ -n "$serial" ] || serial=$(cat /etc/machine-id)
+h=$(printf "%s-bt" "$serial" | sha256sum | cut -c1-10)
+addr=$(printf "02:%s:%s:%s:%s:%s" $(echo "$h" | sed "s/../& /g"))
+btmgmt --index 0 power off >/dev/null 2>&1
+btmgmt --index 0 public-addr "$addr"

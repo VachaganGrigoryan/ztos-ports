@@ -1,0 +1,12 @@
+[Unit]
+Description=Set a stable Bluetooth address (WCN3990 has none on mainline)
+After=sys-subsystem-bluetooth-devices-hci0.device
+Wants=sys-subsystem-bluetooth-devices-hci0.device
+Before=bluetooth.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ztos-bt-addr
+
+[Install]
+WantedBy=multi-user.target
