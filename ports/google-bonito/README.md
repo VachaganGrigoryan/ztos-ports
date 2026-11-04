@@ -42,7 +42,16 @@ ztOS GSI 0.2.1, kernel `linux-postmarketos-qcom-sdm670` 7.2.3 (mainline).
 
 ## Upstream reports
 
-The bugs are reported to the ztOS developers. Links are added here once filed.
+Reported to the ztOS developers:
+
+- [Multi-kernel devices get an empty `kernel =`](https://github.com/Zerone-Laboratories/ztconflo/issues/1)
+- [`dtb_<variant>` ignored, so boot.img has no DTB](https://github.com/Zerone-Laboratories/ztconflo/issues/2)
+- [Firmware dependencies and UCM not installed](https://github.com/Zerone-Laboratories/ztconflo/issues/3)
+- [Daemons enabled but not shipped; `/vendor/ztos/udev` never read](https://github.com/Zerone-Laboratories/ztconflo/issues/4)
+- [Comment-only fstab halts the pmOS initramfs](https://github.com/Zerone-Laboratories/ztconflo/issues/5)
+- [Stale backup GPT on userdata restored over the root](https://github.com/Zerone-Laboratories/ztconflo/issues/6)
+- [No qbootctl, so the A/B slot falls back](https://github.com/Zerone-Laboratories/ztconflo/issues/7)
+- [GSI 0.2.1 release has no files (404)](https://github.com/Zerone-Laboratories/ztos-build/issues/1)
 
 ## References
 
