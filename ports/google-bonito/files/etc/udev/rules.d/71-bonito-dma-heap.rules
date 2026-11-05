@@ -1,0 +1,5 @@
+# libcamera takes the first DMA heap it can open from linux,cma, reserved, system. "reserved"
+# is a small dedicated region here: the software ISP's output buffers then fail ("dma-heap
+# allocation failure") or crowd the camera's raw buffers out of CMA. Root-only, so user
+# programs (ztCamera's libcamera helper) use the system heap.
+SUBSYSTEM=="dma_heap", KERNEL=="reserved", MODE="0600"

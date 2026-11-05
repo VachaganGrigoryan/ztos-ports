@@ -1,0 +1,12 @@
+[Unit]
+Description=Auto brightness from the sensor DSP (ztoscsf-sensord for libssc)
+Wants=iio-sensor-proxy.service
+After=iio-sensor-proxy.service hexagonrpcd-adsp-sensorspd.service
+
+[Service]
+ExecStart=/usr/local/sbin/ztos-ssc-sensord
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,4 @@
+# The vibration motor (drv2624). ztMETRO opens it itself with O_RDWR. libinput never
+# takes this node (it has no keys or axes), so give the seat user an ACL. This must
+# sort before 73-seat-late.rules, which turns the uaccess tag into the ACL.
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="drv2624:haptics", TAG+="uaccess"

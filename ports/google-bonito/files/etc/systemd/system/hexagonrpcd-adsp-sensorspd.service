@@ -5,7 +5,7 @@ Before=suspend.target
 ConditionPathExists=/dev/fastrpc-adsp
 
 [Service]
-ExecStart=/usr/local/bin/hexagonrpcd -f /dev/fastrpc-adsp -d adsp -s
+ExecStart=/usr/local/bin/hexagonrpcd -f /dev/fastrpc-adsp -d adsp -s -R /usr/share/qcom/sdm670/Google/sargo
 Restart=always
 RestartSec=3
 User=fastrpc

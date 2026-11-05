@@ -4,5 +4,10 @@ serial=$(tr " " "\n" < /proc/cmdline | sed -n "s/^androidboot.serialno=//p")
 [ -n "$serial" ] || serial=$(cat /etc/machine-id)
 h=$(printf "%s-bt" "$serial" | sha256sum | cut -c1-10)
 addr=$(printf "02:%s:%s:%s:%s:%s" $(echo "$h" | sed "s/../& /g"))
-btmgmt --index 0 power off >/dev/null 2>&1
-btmgmt --index 0 public-addr "$addr"
+# hci0 shows up before its firmware setup finishes; until then mgmt says "Invalid Index"
+for _ in $(seq 20); do
+	btmgmt --index 0 power off >/dev/null 2>&1
+	btmgmt --index 0 public-addr "$addr" && exit 0
+	sleep 1
+done
+exit 1
