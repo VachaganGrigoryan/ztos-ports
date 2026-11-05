@@ -258,6 +258,8 @@ ssh root@172.16.42.1 '
   done
   alsactl store 0
   U="sudo -u alarm XDG_RUNTIME_DIR=/run/user/1000"
+  L=60-bonito-speaker-loudness.conf; rm -f /etc/pipewire/pipewire.conf.d/$L
+  $U install -Dm644 /usr/local/share/ztos-bonito/$L /home/alarm/.config/pipewire/pipewire.conf.d/$L
   $U systemctl --user restart pipewire pipewire-pulse wireplumber
   sleep 3; $U wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.60'
 ssh root@172.16.42.1 'patch /usr/local/libexec/ztos-waydroid-boot' < patches/ztos-waydroid-boot.diff
@@ -271,7 +273,7 @@ ssh root@172.16.42.1 'patch /usr/local/libexec/ztos-waydroid-boot' < patches/zto
 | libcamera | Both cameras through the software ISP: `cam -l`, `cam -c1 -C30 -F/tmp/f#.ppm -s pixelformat=RGB888,width=1280,height=720` |
 | The Waydroid helpers | ztMETRO runs `ztos-waydroid-power` at every screen-off and app switch, but nothing in the GSI installs it (only `install.sh`, which also rebuilds Android's image). Without it Android never sleeps or freezes. This installs only the helpers, units and sudoers rule |
 | `ztos-waydroid-boot.diff` | Holds the launcher's mark while Android boots, so ztMETRO's "idle" doesn't freeze it half-way; creates the boot mark with `sudo touch`, since `/run` is root's |
-| `60-bonito-speaker-loudness.conf` + swh-plugins | Louder speaker the way Android does it: +8 dB into a look-ahead limiter (peaks stay under −1 dBFS). A WirePlumber smart filter in front of the speaker sink only, so headphones bypass it. Delete the file and restart pipewire to switch it off |
+| `60-bonito-speaker-loudness.conf` + swh-plugins | Louder speaker the way Android does it: +8 dB into a look-ahead limiter (peaks stay under −1 dBFS). A WirePlumber smart filter in front of the speaker sink only, so headphones bypass it. It's in the user's PipeWire config, so `ztos-speaker-boost` (the volume keys past 30, step 15) can add a high-pass (up to 600 Hz) and more gain into it and a second limiter, without root or a restart. Delete it and restart pipewire to switch the filter off |
 | Speaker boost | The CS35L36 amps start with their boost converter off, so the speaker runs straight off the battery and is quiet. The device tree sets the boost (10 V, 2.6 A) as Android does. Analog gain is at its maximum, 19. The built-in mic: PipeWire drives `ADC1 Capture Volume` as the mic's hardware volume, and at 100% it is 63 (max) and clips; 0.60 gives the UCM's 45, and WirePlumber keeps it |
 
 ## 14. Camera
@@ -331,6 +333,12 @@ Three ztOS apps describe the Galaxy S9 instead of the phone they run on:
 - **Settings** says "Samsung Galaxy S9", Exynos 9810, Mali-G72 and 3000 mAh;
 - ztMETRO's **flashlight tile** looks only for the S9's LED (`white:torch`).
 
+[patches/ztmetro-speaker-boost.diff](patches/ztmetro-speaker-boost.diff) lets the volume go on past
+30/30 to **speaker boost** 1…10, when `/usr/local/bin/ztos-speaker-boost` is installed (step 13 does that).
+30/30 is already 100%. Each boost step cuts more bass and pushes harder into the speaker's limiters; at 10
+the speaker's band is about 2.4 dB louder, with audible squashing. Stepping back to 30 or below turns it off.
+The speaker has no thermal protection, so avoid long stretches at full boost.
+
 [patches/ztdevices-any-phone.diff](patches/ztdevices-any-phone.diff) lets ztdevices take patterns
 (`/sys/class/backlight/*`, `*battery*`, `*:flash`) and hides an S9 service that isn't installed.
 [patches/ztsettings-device-info.diff](patches/ztsettings-device-info.diff) reads the model from ztOSIAL
@@ -341,7 +349,7 @@ or `*:flash` LED, at its `max_brightness`. On the S9 all three fall back to what
 Build them on the phone from ztOS `7f42ddc`, in the tree from step 14:
 
 ```sh
-for p in ztdevices-any-phone ztsettings-device-info ztmetro-torch-led; do
+for p in ztdevices-any-phone ztsettings-device-info ztmetro-torch-led ztmetro-speaker-boost; do
   ssh root@172.16.42.1 'cd /usr/local/src/ztOS && patch -p1' < patches/$p.diff
 done
 ssh root@172.16.42.1 '
