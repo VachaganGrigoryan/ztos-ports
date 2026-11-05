@@ -48,6 +48,7 @@ pmaports `b1bc0428`, kernel `linux-postmarketos-qcom-sdm670` 7.2.3. Date 2026-11
 | 33 | Flashlight tile drawn faint, does nothing (see 15) | `ztmetro.c` writes only `/sys/class/leds/white:torch/brightness`, at Samsung's level 9 | [patches/ztmetro-torch-led.diff](patches/ztmetro-torch-led.diff): the first `*:torch`, then `*:flash` LED, at its `max_brightness` (255: `leds-qcom-flash`'s torch current) (step 15). Checked: the tile switches `white:flash` between 255 and 0 |
 | 34 | Settings: "Samsung Galaxy S9 (SM-G960N starlte)", Exynos 9810, Mali-G72, 3000 mAh, UFS; the big cluster's clock blank and its governor never set | `ztsettings.c` hard-codes the S9, and `cpufreq/policy4` (here the big cluster is `policy6`) | [patches/ztsettings-device-info.diff](patches/ztsettings-device-info.diff): the model from ztOSIAL `Device1.Name`, the rest from `soc0`, the cpufreq policies, the GPU's device tree name, the DSI mode, `charge_full_design` and the root's block device (step 15) |
 | 35 | Status bar, Phone and Messages: no modem at all, though ModemManager has it | ztMETRO, ztPhone and ztMessages talk only to ztoscorenetworkingd (`/run/ztoscorenetworking/status`, its control pipe, its SMS and call logs), which drives only the S9's Samsung modem | `ztos-mm-modemd`: the same protocol, from ModemManager (signal, operator, registration, technology, airplane, data, SMS, calls). Checked without a SIM: `sim=absent`, airplane mode on and off, a refused SMS logged as failed |
+| 36 | Speaker still too quiet; the volume "stops at 30" | 30/30 is ztMETRO's 100% (Windows Phone's scale). Everything after it is at maximum too: the amps' gain 19, 0 dB digital, 10 V boost (Android's own value), no fault or brownout bits. Loud music already reaches the limiter's −1 dB ceiling at +8 dB, so more gain alone adds ~1 dB | [patches/ztmetro-speaker-boost.diff](patches/ztmetro-speaker-boost.diff): the volume keys go on past 30 to speaker boost 1…10 when `ztos-speaker-boost` is installed. Each step raises a high-pass (60 Hz per step, up to 600 Hz: bass the speaker can't play) and the gain into two limiters, live with `pw-cli set-param` and saved in the filter's config, now in `~/.config/pipewire/pipewire.conf.d/` so no root is needed. Measured on a ringtone, in the speaker's band (above 500 Hz): +1.5 dB at 5, +2.4 dB at 10 (steps 13, 15) |
 
 ## What still doesn't work
 
@@ -73,8 +74,12 @@ Linux; what's missing is ztOS userspace.
 - **Speaker loudness:** with boost alone (fix 23) the speaker stayed quiet, although the amps
   were at their design level during playback: boost engaged (`PWR_CTRL2` = 0x21, 10 V target),
   0 dB digital, no error or brownout flags (`INT1..4`, `VPBR_STATUS` = 0). Android adds a
-  loudness stage on top, so the port now does too (+8 dB and a limiter, fix 23). There is still
-  no speaker protection (Android's thermal model), so avoid long stretches at full volume.
+  loudness stage on top, so the port now does too (+8 dB and a limiter, fix 23; up to +2.4 dB more
+  with speaker boost, fix 36). That is about all software can do: the signal is already near full
+  scale. A higher boost voltage doesn't help either: these are the 10 V CS35L36s (`CS35L36_10V_L36`),
+  and the driver clamps the boost to 10 V whatever the device tree asks (tried 12 V: the register
+  stays at `0x96`). There is still no speaker protection (Android's thermal model), so avoid long stretches
+  at full volume, above all with boost on.
 - **Audio quirk:** pmOS's UCM has only the `VoiceCall` verb. The sink is "Earpiece (L) and
   Speaker (R)", so the left channel of music goes to the earpiece.
 - **Not supported:** NFC (`nfc0` is up; ztOS has no NFC stack) and fingerprint.

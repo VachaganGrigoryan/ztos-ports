@@ -1,0 +1,28 @@
+#!/bin/sh
+# Speaker boost, 0..10: the volume keys past 30/30 (ztMETRO). Each step adds 1.2 dB into the
+# speaker's first limiter (8 dB at 0, 20 at 10), 1.2 dB into the second (0 to 12), and raises
+# the high-pass by 60 Hz (flat at 0, 600 Hz at 10), as Android tunes small speakers: without the
+# bass it can't play, the rest gets louder. Both limiters keep peaks under -1 dBFS. Measured on
+# a ringtone: +2.6 dB in the speaker's band at 10, with audible squashing.
+# Saved in the filter's config and set on the running filter, so nothing restarts.
+# `status` prints the level.
+C=${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/pipewire.conf.d/60-bonito-speaker-loudness.conf
+case $1 in
+status)
+	sed -n 's/.*"Freq" = \([0-9.]*\).*/\1/p' "$C" 2>/dev/null |
+		awk '{ l = int($1 / 60 + 0.5); print (l > 10 ? 10 : l); exit } END { if (!NR) print 0 }'
+	exit 0 ;;
+[0-9] | 10) ;;
+*) echo "usage: ztos-speaker-boost 0..10|status" >&2; exit 2 ;;
+esac
+g=$(awk -v l="$1" 'BEGIN { printf "%.1f", 8 + 1.2 * l }')
+g2=$(awk -v l="$1" 'BEGIN { printf "%.1f", 1.2 * l }')
+f=$(awk -v l="$1" 'BEGIN { printf "%.1f", l ? 60 * l : 20 }')
+# the first limiter's gain is the line with Release 0.08, the second's with 0.05
+sed -i -e "/0\.08 }/s/\"Input gain (dB)\" = [0-9.]*/\"Input gain (dB)\" = $g/" \
+	-e "/0\.05 }/s/\"Input gain (dB)\" = [0-9.]*/\"Input gain (dB)\" = $g2/" \
+	-e "s/\"Freq\" = [0-9.]*/\"Freq\" = $f/g" "$C" || exit 1
+id=$(pw-cli ls Node | awk '/^[[:space:]]*id [0-9]+,/ { id = $2 + 0 }
+	/node.name = "effect_input.speaker_loudness"/ { print id; exit }')
+[ -z "$id" ] || pw-cli set-param "$id" Props "{ params = [ \"limiter:Input gain (dB)\" $g
+	\"limiter2:Input gain (dB)\" $g2 \"hp_l:Freq\" $f \"hp_r:Freq\" $f ] }" >/dev/null
