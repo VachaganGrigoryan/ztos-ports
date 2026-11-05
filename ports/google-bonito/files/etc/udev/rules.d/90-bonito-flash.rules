@@ -1,0 +1,3 @@
+# The rear flash as a torch (leds-qcom-flash): the shell, in group video, switches it.
+# It is the S9's 90-zrn-flash.rules with the LED's mainline name.
+ACTION=="add", SUBSYSTEM=="leds", KERNEL=="white:flash", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod g+w /sys%p/brightness"

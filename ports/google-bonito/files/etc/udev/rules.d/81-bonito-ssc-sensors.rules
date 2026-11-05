@@ -1,0 +1,4 @@
+# iio-sensor-proxy with libssc: Arch's 80-iio-sensor-proxy.rules only enables ssc-light and
+# ssc-compass on fastrpc-adsp; this phone also has an accelerometer (bmi160) and a proximity
+# sensor (tmd2725) behind the sensor DSP.
+SUBSYSTEM=="misc", KERNEL=="fastrpc-adsp*", ENV{IIO_SENSOR_PROXY_TYPE}+="ssc-accel ssc-proximity"

@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""ztos-ssc-sensord: auto brightness for ztMETRO from iio-sensor-proxy (the Qualcomm
+sensor DSP through libssc). It stands in for ztOS's ztoscsf-sensord, which talks only to
+the Galaxy S9's sensor hub, and speaks the same protocol:
+
+  /run/ztoscsf-sensord.ctl     lines "screen on|off", "auto on|off" (anyone may write)
+  /run/ztoscsf-sensors/status  auto=, screen=, opentone=  (ztSettings reads it)
+  /run/ztoscsf-sensors/light   the last lux
+  "brightness-auto N" down /run/user/*/ztmetro.ctl, N in tenths of a percent L*
+
+The lux-to-brightness curve, smoothing and delays are copied from
+ztmetro/sensord/ztoscsf-sensord.c. `ztos-ssc-sensord --self-test` checks them.
+"""
+import glob
+import itertools
+import math
+import os
+import sys
+import time
+
+CTL = '/run/ztoscsf-sensord.ctl'
+OUT = '/run/ztoscsf-sensors'
+STATE = '/var/lib/ztoscsf-sensord/state'
+
+# ztoscsf-sensord.c: Samsung's auto table (lux, nits), the panel's peak, its floor in L*
+CURVE = [(1, 10), (7, 25), (55, 110), (700, 170), (1400, 250), (2500, 400)]
+PANEL_PEAK_NITS = 400.0
+AUTO_FLOOR_L = 18.03
+LIGHT_SMOOTH = 0.35     # share of each reading taken
+LIGHT_STEP = 30         # tenths of L* the goal must move by
+LIGHT_UP_S = 4.0
+LIGHT_DOWN_S = 8.0
+
+
+def lux_to_permille(lux):
+    nits = CURVE[0][1]
+    if lux >= CURVE[-1][0]:
+        nits = CURVE[-1][1]
+    elif lux > CURVE[0][0]:
+        for (l0, n0), (l1, n1) in itertools.pairwise(CURVE):
+            if lux <= l1:
+                t = (math.log10(lux) - math.log10(l0)) / (math.log10(l1) - math.log10(l0))
+                nits = n0 + (n1 - n0) * t
+                break
+    level = 116.0 * math.cbrt(nits / PANEL_PEAK_NITS) - 16.0
+    return int(min(100.0, max(AUTO_FLOOR_L, level)) * 10.0 + 0.5)   # lround, positive
+
+
+class Auto:
+    """light_decide() and light() of ztoscsf-sensord.c. send(permille) -> whether a shell took it."""
+
+    def __init__(self, send):
+        self.send = send
+        self.auto_on = True
+        self.screen_on = True
+        self.lux_smooth = -1.0
+        self.goal = -1
+        self.way = 0
+        self.since = 0.0
+
+    def reset(self):            # the screen came back, or auto was switched
+        self.goal = -1
+        self.lux_smooth = -1.0
+
+    def show(self, permille):
+        self.goal = permille if self.send(permille) else -1   # not taken: ask again next reading
+
+    def reading(self, lux, now):
+        level = math.log10(lux + 1.0)
+        self.lux_smooth = level if self.lux_smooth < 0 else self.lux_smooth + (level - self.lux_smooth) * LIGHT_SMOOTH
+        if not self.auto_on or not self.screen_on:
+            return
+        target = lux_to_permille(10.0 ** self.lux_smooth - 1.0)
+        if self.goal < 0:
+            self.way = 0
+            self.show(target)
+            return
+        way = 0 if abs(target - self.goal) < LIGHT_STEP else (1 if target > self.goal else -1)
+        if way != self.way:
+            self.way, self.since = way, now
+        if way and now - self.since >= (LIGHT_UP_S if way > 0 else LIGHT_DOWN_S):
+            self.way = 0
+            self.show(target)
+
+
+def tell_shell(line):
+    sent = False
+    for path in glob.glob('/run/user/*/ztmetro.ctl'):
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)    # no shell reading: ENXIO
+        except OSError:
+            continue
+        try:
+            os.write(fd, line.encode())
+            sent = True
+        except OSError:
+            pass                                                # busy; the next reading tries again
+        finally:
+            os.close(fd)
+    return sent
+
+
+def publish(name, text):
+    path = os.path.join(OUT, name)
+    with open(path + '.new', 'w') as f:
+        f.write(text)
+    os.replace(path + '.new', path)
+
+
+def main():
+    from gi.repository import Gio, GLib
+
+    auto = Auto(lambda p: tell_shell(f'brightness-auto {p}\n'))
+    os.makedirs(OUT, exist_ok=True)
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+
+    def status():
+        publish('status', f"auto={'on' if auto.auto_on else 'off'}\n"
+                          f"screen={'on' if auto.screen_on else 'off'}\nopentone=off\n")
+
+    def command(line, persist):
+        words = line.split()
+        if len(words) < 2:
+            return
+        what, value = words[0], words[1]
+        if what == 'screen':
+            auto.screen_on = value != 'off'
+            auto.reset()
+        elif what == 'auto':
+            auto.auto_on = value == 'on'
+            auto.reset()
+            if persist:
+                with open(STATE, 'w') as f:
+                    f.write(f"auto {value}\n")
+        status()
+
+    try:
+        with open(STATE) as f:
+            for line in f:
+                command(line, False)
+    except OSError:
+        pass
+    status()
+
+    try:
+        os.unlink(CTL)
+    except FileNotFoundError:
+        pass
+    os.mkfifo(CTL, 0o666)
+    os.chmod(CTL, 0o666)
+    try:
+        os.unlink('/run/zrn-sensord.ctl')       # ztSettings writes both names
+    except FileNotFoundError:
+        pass
+    os.symlink(CTL, '/run/zrn-sensord.ctl')
+    ctl = os.open(CTL, os.O_RDWR | os.O_NONBLOCK)
+    pending = b''
+
+    def on_ctl(fd, _cond):
+        nonlocal pending
+        try:
+            pending += os.read(fd, 4096)
+        except BlockingIOError:
+            return True
+        *lines, pending = pending.split(b'\n')
+        for line in lines:
+            command(line.decode(errors='replace'), True)
+        return True
+    try:
+        from gi.repository import GLibUnix  # GLib >= 2.80
+        GLibUnix.fd_add_full(GLib.PRIORITY_DEFAULT, ctl, GLib.IOCondition.IN, on_ctl)
+    except ImportError:
+        GLib.unix_fd_add_full(GLib.PRIORITY_DEFAULT, ctl, GLib.IOCondition.IN, on_ctl)
+
+    proxy = Gio.DBusProxy.new_for_bus_sync(
+        Gio.BusType.SYSTEM, Gio.DBusProxyFlags.NONE, None,
+        'net.hadess.SensorProxy', '/net/hadess/SensorProxy', 'net.hadess.SensorProxy', None)
+    has = proxy.get_cached_property('HasAmbientLight')
+    if not (has and has.unpack()):
+        print('ztos-ssc-sensord: iio-sensor-proxy has no light sensor (yet)', file=sys.stderr)
+        return 1            # systemd restarts us; the DSP may still be coming up
+    proxy.call_sync('ClaimLight', None, Gio.DBusCallFlags.NONE, -1, None)
+    print('ztos-ssc-sensord: light sensor claimed', file=sys.stderr)
+    last = [-1.0]
+
+    def tick():             # one reading a second, as ztoscsf-sensord.c does
+        value = proxy.get_cached_property('LightLevel')
+        if value is not None:
+            lux = max(0.0, value.unpack())
+            if last[0] < 0 or abs(lux - last[0]) >= max(2.0, last[0] * 0.05):   # 5 %, at least 2
+                last[0] = lux
+                publish('light', f'{int(lux)}\n')
+            auto.reading(lux, time.monotonic())
+        return True
+    GLib.timeout_add_seconds(1, tick)
+    GLib.MainLoop().run()
+    return 0
+
+
+def self_test():
+    assert lux_to_permille(0) == 180, lux_to_permille(0)          # the floor
+    assert lux_to_permille(5000) == 1000                           # the peak
+    levels = [lux_to_permille(x) for x in (0, 1, 5, 50, 300, 1000, 2000, 2500)]
+    assert levels == sorted(levels), levels                        # brighter room, brighter screen
+    sent = []
+    a = Auto(lambda p: sent.append(p) or True)
+    a.reading(100.0, 0.0)
+    assert sent == [lux_to_permille(100.0)], sent                  # the first reading goes out at once
+    for t in range(1, 4):
+        a.reading(100.0, float(t))
+    assert len(sent) == 1                                          # same room: nothing new
+    for t in range(4, 12):
+        a.reading(3000.0, float(t))
+    assert len(sent) == 2 and sent[1] > sent[0], sent              # brighter for 4 s: up
+    a.screen_on = False
+    a.reading(0.0, 20.0)
+    assert len(sent) == 2                                          # screen off: quiet
+    b = Auto(lambda p: False)
+    b.reading(100.0, 0.0)
+    assert b.goal == -1                                            # no shell took it: ask again
+    print('self-test ok')
+
+
+if __name__ == '__main__':
+    if sys.argv[1:] == ['--self-test']:
+        self_test()
+    else:
+        sys.exit(main())

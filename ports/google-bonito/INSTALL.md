@@ -190,13 +190,23 @@ sudo tar -C $P/usr/share -cf - qcom alsa/ucm2/Google/sargo alsa/ucm2/conf.d/sdm6
 ssh root@172.16.42.1 '
   ldconfig
   getent passwd fastrpc >/dev/null || useradd -r -U -M -d / -s /usr/bin/nologin fastrpc
-  udevadm control --reload && udevadm trigger --subsystem-match=misc
+  usermod -aG video,input,audio alarm
+  sed -i "s/^#DisableSandboxFilesystem/DisableSandboxFilesystem/" /etc/pacman.conf
+  M=/vendor/ztos/manifest.toml
+  sed -i -e "s|^node = \"auto\"|node = \"/sys/class/backlight/ae94000.dsi.0\"|" \
+         -e "s|^device = \"auto\"|device = \"drv2624:haptics\"|" $M
+  grep -q "^torch = " $M || sed -i "/^\[ial.Lights1\]/a torch = \"white:flash\"" $M
+  udevadm control --reload
+  udevadm trigger --subsystem-match=misc --subsystem-match=input --subsystem-match=leds
   qbootctl -m
   systemctl daemon-reload
+  systemctl disable --now ztoscorenetworking-modem ztoscorenetworking
   systemctl enable --now qbootctl tqftpserv rmtfs ztos-bt-addr bluetooth \
     hexagonrpcd-adsp-rootpd hexagonrpcd-adsp-sensorspd
   nmcli general reload conf'
 ```
+
+Reboot afterwards. The new groups only reach ztMETRO when `alarm` logs in again.
 
 About 10 seconds later `wlan0` appears. Connect to Wi-Fi from ztOS **Settings**. The files do the following:
 
@@ -207,14 +217,126 @@ About 10 seconds later `wlan0` appears. Connect to Wi-Fi from ztOS **Settings**.
 | `10-stable-wifi-mac.conf` | Stable Wi-Fi MAC per network |
 | `hexagonrpcd-*` + udev rules | Serves the sensor DSP |
 | UCM files | Speaker and microphone routing |
+| `usermod -aG video,input,audio alarm` | ztConflo never adds these groups, so ztMETRO can't open the vibration motor or switch the torch |
+| `70-bonito-haptics.rules` | Gives the logged-in user the vibration motor (`drv2624`) |
+| `90-bonito-flash.rules` | Lets group `video` switch the flash LED as a torch |
+| `DisableSandboxFilesystem` in `pacman.conf` | pacman 7's download sandbox needs Landlock, which this kernel lacks, so updates fail without it |
+| `manifest.toml` edits | Names the real backlight, vibration motor and torch for ztOSIAL instead of `"auto"` |
+| `ztoscoresensorframework/components` | Watches this phone's services instead of the Galaxy S9's, so no false "did not start" banners |
+| `tmpfiles.d/ztos-no-sensorhub.conf` | Marks the (absent) Samsung sensor hub as stopped at boot, so ztoscsf doesn't show the "Sensor hub failed" dialog |
+| `disable ztoscorenetworking*` | The Galaxy S9 modem daemons. Their binary isn't in the GSI, so they restart forever |
+| `81-bonito-ssc-sensors.rules` | Lets iio-sensor-proxy use the accelerometer and proximity sensor behind the sensor DSP, not just the light sensor |
+| `ztos-ssc-sensord` + unit | Auto brightness: does ztoscsf-sensord's job (which only knows the S9's sensor hub) from iio-sensor-proxy, with the same protocol and curve |
+| `71-bonito-dma-heap.rules` | Makes the small `reserved` DMA heap root-only, so libcamera uses the system heap for camera buffers (step 14) |
+| `tmpfiles.d/ztos-thp-madvise.conf` | Transparent huge pages only on request: with `always`, kernel 7.2.3 warns in `set_shrinker_bit` when apps fault them in |
 
-## 13. Check it
+## 13. Sensors, modem, cameras, Android and the speaker
+
+This step needs the Wi-Fi from step 12. All the packages are in Arch Linux ARM's `[extra]`.
 
 ```sh
-ssh root@172.16.42.1 'qbootctl | head -5; for r in /sys/class/remoteproc/*; do echo "$(cat $r/name) $(cat $r/state)"; done; ip -br link | grep wlan0; bluetoothctl show | grep Powered'
+ssh root@172.16.42.1 '
+  pacman -S --needed --noconfirm modemmanager libqmi iio-sensor-proxy libssc \
+    libcamera libcamera-ipa libcamera-tools swh-plugins
+  udevadm trigger --action=change --subsystem-match=misc --sysname-match="fastrpc-adsp*"
+  systemctl enable --now ModemManager ztos-ssc-sensord
+  systemd-tmpfiles --create
+  W=/usr/share/ztos-waydroid
+  install -Dm755 $W/power.sh /usr/local/bin/ztos-waydroid-power
+  install -Dm755 $W/launch.sh /usr/local/bin/ztos-waydroid-launch
+  install -Dm755 $W/recover.sh /usr/local/libexec/ztos-waydroid-recover
+  install -Dm755 $W/audio-recover.py /usr/local/libexec/ztos-waydroid-audio
+  install -Dm755 $W/ztos-waydroid-boot /usr/local/libexec/ztos-waydroid-boot
+  install -Dm644 $W/ztos-waydroid-boot.service /etc/systemd/user/ztos-waydroid-boot.service
+  install -Dm644 $W/ztos-waydroid-session.service /etc/systemd/user/ztos-waydroid-session.service
+  sed -n "/^\$ZTOS_USER ALL=(root) NOPASSWD: \/usr\/local\/libexec\/ztos-waydroid-recover audio/p" $W/install.sh \
+    | sed "s/^\$ZTOS_USER/alarm/" > /tmp/zw && visudo -cf /tmp/zw && install -m440 /tmp/zw /etc/sudoers.d/ztos-waydroid
+  systemctl --global enable ztos-waydroid-boot.service
+  for a in Top Bottom; do
+    amixer -q -D hw:0 cset "iface=MIXER,name=$a BOOST Enable Switch" on
+    amixer -q -D hw:0 cset "iface=MIXER,name=$a Analog PCM Volume" 19
+  done
+  alsactl store 0
+  U="sudo -u alarm XDG_RUNTIME_DIR=/run/user/1000"
+  $U systemctl --user restart pipewire pipewire-pulse wireplumber
+  sleep 3; $U wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.60'
+ssh root@172.16.42.1 'patch /usr/local/libexec/ztos-waydroid-boot' < patches/ztos-waydroid-boot.diff
 ```
 
-You should see the slot `Successful : 1`, three `running` remote processors, `wlan0`, and `Powered: yes`. Reboot once to confirm everything comes back on its own.
+| What | Why |
+|---|---|
+| ModemManager + libqmi | Finds the modem over QRTR (`mmcli -L`). Calls and SMS still need a SIM and a bridge to ztMETRO (see FIXES.md) |
+| iio-sensor-proxy + libssc | Reads the light, accelerometer and proximity sensors from the sensor DSP (`monitor-sensor`) |
+| libcamera | Both cameras through the software ISP: `cam -l`, `cam -c1 -C30 -F/tmp/f#.ppm -s pixelformat=RGB888,width=1280,height=720` |
+| The Waydroid helpers | ztMETRO runs `ztos-waydroid-power` at every screen-off and app switch, but nothing in the GSI installs it (only `install.sh`, which also rebuilds Android's image). Without it Android never sleeps or freezes. This installs only the helpers, units and sudoers rule |
+| `ztos-waydroid-boot.diff` | Holds the launcher's mark while Android boots, so ztMETRO's "idle" doesn't freeze it half-way; creates the boot mark with `sudo touch`, since `/run` is root's |
+| `60-bonito-speaker-loudness.conf` + swh-plugins | Louder speaker the way Android does it: +8 dB into a look-ahead limiter (peaks stay under −1 dBFS). A WirePlumber smart filter in front of the speaker sink only, so headphones bypass it. Delete the file and restart pipewire to switch it off |
+| Speaker boost | The CS35L36 amps start with their boost converter off, so the speaker runs straight off the battery and is quiet. The device tree sets the boost (10 V, 2.6 A) as Android does. Analog gain is at its maximum, 19. The built-in mic: PipeWire drives `ADC1 Capture Volume` as the mic's hardware volume, and at 100% it is 63 (max) and clips; 0.60 gives the UCM's 45, and WirePlumber keeps it |
+
+## 14. Camera
+
+ztCamera only knows the Galaxy S9's camera driver and plain YUYV V4L2 devices. Both cameras work on mainline,
+but only through libcamera's software ISP. [patches/ztcamera-libcamera.diff](patches/ztcamera-libcamera.diff)
+adds a libcamera source to ztCamera:
+
+- it reads each camera from `gst-launch-1.0 libcamerasrc` in a helper process. libcamera's GPU debayer runs
+  there and scales the whole sensor; inside ztCamera it would share EGL with the viewfinder and stall;
+- the facing button switches between back and front (mirrored);
+- autofocus: a contrast sweep of the lens motor when Camera opens or you tap the picture. The focus dial's
+  macro/normal/infinity set fixed positions;
+- digital zoom 1×/2×/4× on the button next to the camera roll;
+- one camera user at a time, with a lock, and a helper that dies with the app. A second libcamera
+  program starting while one streams stops both, and only a reboot brings the camera back.
+
+Build it on the phone from ztOS `7f42ddc`, the commit the GSI 0.2.1 apps match:
+
+```sh
+ssh root@172.16.42.1 'pacman -S --needed --noconfirm gst-plugin-libcamera'
+git clone https://github.com/Zerone-Laboratories/ztOS.git && git -C ztOS checkout 7f42ddc
+tar -C ztOS -cf - ztmetro | ssh root@172.16.42.1 'mkdir -p /usr/local/src/ztOS && tar -C /usr/local/src/ztOS -xf -'
+ssh root@172.16.42.1 'cd /usr/local/src/ztOS && patch -p1' < patches/ztcamera-libcamera.diff
+ssh root@172.16.42.1 '
+  cd /usr/local/src/ztOS/ztmetro && make camera/ztcamera
+  [ -e /usr/local/bin/ztcamera.gsi ] || cp -a /usr/local/bin/ztcamera /usr/local/bin/ztcamera.gsi
+  install -Dm755 camera/ztcamera /usr/local/libexec/ztcamera
+  cat > /usr/local/bin/ztcamera <<EOF
+#!/bin/sh
+# ztCamera on the Pixel 3a XL: libcamera in a GStreamer helper (GPU debayer, whole sensor),
+# back camera imx363 (mounted at 90: 270 clockwise makes it upright), front imx355 (90, mirrored).
+# The voice-coil lens: 0 is infinity, 4095 its nearest.
+B=/base/soc@0/cci@ac4a000/i2c-bus@0/camera@1a
+F=/base/soc@0/cci@ac4a000/i2c-bus@1/camera@1a
+exec /usr/local/libexec/ztcamera --libcamera "\$B:270" --libcamera "\$F:90:mirror" --focus 0,1500,4095 "\$@"
+EOF
+  chmod 755 /usr/local/bin/ztcamera
+  udevadm trigger --subsystem-match=dma_heap'
+```
+
+`71-bonito-dma-heap.rules` (from step 12) makes `/dev/dma_heap/reserved` root-only. libcamera takes the first
+heap it can open, and that small region fails the ISP's buffers (`dma-heap allocation failure`). The status
+line then reads `camera · 1280x960 · 29 fps`. To go back: `mv /usr/local/bin/ztcamera.gsi /usr/local/bin/ztcamera`.
+
+- **Picture quality:** there's no libcamera tuning for imx363/imx355 (`uncalibrated.yaml`), so colour is
+  plain and dim rooms are noisy (the sensor runs at full gain).
+- **If the picture goes black** and the note says "no picture from the camera", restart the phone (see above).
+
+## 15. Check it
+
+```sh
+ssh root@172.16.42.1 'qbootctl | head -5; for r in /sys/class/remoteproc/*; do echo "$(cat $r/name) $(cat $r/state)"; done; ip -br link | grep wlan0; bluetoothctl show | grep Powered
+  id alarm; ls -l /proc/$(pidof ztmetro)/fd | grep -c event3; systemctl --failed --no-legend'
+```
+
+You should see:
+- the slot `Successful : 1`;
+- three `running` remote processors;
+- `wlan0`;
+- `Powered: yes`;
+- `alarm` in `video`, `input` and `audio`;
+- `1` (ztMETRO holds the vibration motor);
+- no failed units.
+
+Reboot once to confirm everything comes back on its own.
 
 ## If something goes wrong
 

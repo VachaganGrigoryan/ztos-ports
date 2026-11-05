@@ -1,0 +1,14 @@
+# ztOSCoreSensorFramework on the Pixel 3a XL: the pieces this phone really runs.
+# The GSI ships the Galaxy S9's list (zrn_* modules, the sensor hub, the Samsung
+# modem), which fails at every boot here. kind|id|argument|title, in start order.
+#
+#   module   a kernel module with no service of its own
+#   unit     a systemd unit that keeps its own process alive
+#   session  a program of the user's session: watched, not started
+unit|rmtfs.service||Modem storage (rmtfs)
+unit|tqftpserv.service||Modem files (tqftpserv)
+unit|hexagonrpcd-adsp-rootpd.service||ADSP FastRPC (root)
+unit|hexagonrpcd-adsp-sensorspd.service||Sensor DSP (FastRPC)
+unit|bluetooth.service||Bluetooth
+unit|zrnperfd.service||Performance
+session|ztapps||App list
