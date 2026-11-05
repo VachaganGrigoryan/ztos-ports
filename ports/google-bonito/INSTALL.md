@@ -222,7 +222,7 @@ About 10 seconds later `wlan0` appears. Connect to Wi-Fi from ztOS **Settings**.
 | `90-bonito-flash.rules` | Lets group `video` switch the flash LED as a torch |
 | `DisableSandboxFilesystem` in `pacman.conf` | pacman 7's download sandbox needs Landlock, which this kernel lacks, so updates fail without it |
 | `manifest.toml` edits | Names the real backlight, vibration motor and torch for ztOSIAL instead of `"auto"` |
-| `ztoscoresensorframework/components` | Watches this phone's services instead of the Galaxy S9's, so no false "did not start" banners |
+| `ztoscoresensorframework/components` | Watches this phone's services instead of the Galaxy S9's, so no false "did not start" banners. Devices and Services lists the same ones |
 | `tmpfiles.d/ztos-no-sensorhub.conf` | Marks the (absent) Samsung sensor hub as stopped at boot, so ztoscsf doesn't show the "Sensor hub failed" dialog |
 | `disable ztoscorenetworking*` | The Galaxy S9 modem daemons. Their binary isn't in the GSI, so they restart forever |
 | `81-bonito-ssc-sensors.rules` | Lets iio-sensor-proxy use the accelerometer and proximity sensor behind the sensor DSP, not just the light sensor |
@@ -239,7 +239,7 @@ ssh root@172.16.42.1 '
   pacman -S --needed --noconfirm modemmanager libqmi iio-sensor-proxy libssc \
     libcamera libcamera-ipa libcamera-tools swh-plugins
   udevadm trigger --action=change --subsystem-match=misc --sysname-match="fastrpc-adsp*"
-  systemctl enable --now ModemManager ztos-ssc-sensord
+  systemctl enable --now ModemManager ztos-ssc-sensord ztos-mm-modemd
   systemd-tmpfiles --create
   W=/usr/share/ztos-waydroid
   install -Dm755 $W/power.sh /usr/local/bin/ztos-waydroid-power
@@ -265,7 +265,8 @@ ssh root@172.16.42.1 'patch /usr/local/libexec/ztos-waydroid-boot' < patches/zto
 
 | What | Why |
 |---|---|
-| ModemManager + libqmi | Finds the modem over QRTR (`mmcli -L`). Calls and SMS still need a SIM and a bridge to ztMETRO (see FIXES.md) |
+| ModemManager + libqmi | Finds the modem over QRTR (`mmcli -L`) |
+| `ztos-mm-modemd` + unit | The modem for ztMETRO, Phone and Messages: does ztoscorenetworkingd's job (which only knows the S9's Samsung modem) through ModemManager, with the same status file, control pipe and SMS/call logs. Without a SIM it reports `sim=absent`; calls, SMS and data are untested, and call audio isn't routed |
 | iio-sensor-proxy + libssc | Reads the light, accelerometer and proximity sensors from the sensor DSP (`monitor-sensor`) |
 | libcamera | Both cameras through the software ISP: `cam -l`, `cam -c1 -C30 -F/tmp/f#.ppm -s pixelformat=RGB888,width=1280,height=720` |
 | The Waydroid helpers | ztMETRO runs `ztos-waydroid-power` at every screen-off and app switch, but nothing in the GSI installs it (only `install.sh`, which also rebuilds Android's image). Without it Android never sleeps or freezes. This installs only the helpers, units and sudoers rule |
@@ -320,11 +321,48 @@ line then reads `camera · 1280x960 · 29 fps`. To go back: `mv /usr/local/bin/z
   plain and dim rooms are noisy (the sensor runs at full gain).
 - **If the picture goes black** and the note says "no picture from the camera", restart the phone (see above).
 
-## 15. Check it
+## 15. Devices and Services, Settings and the flashlight tile
+
+Three ztOS apps describe the Galaxy S9 instead of the phone they run on:
+
+- **Devices and Services** (`ztdevices`) reports a working touch screen, GPU, battery, charger, vibration
+  motor, modem, flashlight and backlight as missing, because it looks for the S9's driver names. It also
+  lists five S9-only services as "not installed";
+- **Settings** says "Samsung Galaxy S9", Exynos 9810, Mali-G72 and 3000 mAh;
+- ztMETRO's **flashlight tile** looks only for the S9's LED (`white:torch`).
+
+[patches/ztdevices-any-phone.diff](patches/ztdevices-any-phone.diff) lets ztdevices take patterns
+(`/sys/class/backlight/*`, `*battery*`, `*:flash`) and hides an S9 service that isn't installed.
+[patches/ztsettings-device-info.diff](patches/ztsettings-device-info.diff) reads the model from ztOSIAL
+(`Device1.Name`) and the SoC, CPU clusters, GPU, panel, battery and storage from sysfs.
+[patches/ztmetro-torch-led.diff](patches/ztmetro-torch-led.diff) makes the tile use the first `*:torch`
+or `*:flash` LED, at its `max_brightness`. On the S9 all three fall back to what they showed before.
+
+Build them on the phone from ztOS `7f42ddc`, in the tree from step 14:
+
+```sh
+for p in ztdevices-any-phone ztsettings-device-info ztmetro-torch-led; do
+  ssh root@172.16.42.1 'cd /usr/local/src/ztOS && patch -p1' < patches/$p.diff
+done
+ssh root@172.16.42.1 '
+  cd /usr/local/src/ztOS/ztmetro && make devices/ztdevices settings/ztsettings ztmetro
+  for a in ztdevices:devices/ztdevices ztsettings:settings/ztsettings ztmetro:ztmetro; do
+    n=${a%%:*}
+    [ -e /usr/local/bin/$n.gsi ] || cp -a /usr/local/bin/$n /usr/local/bin/$n.gsi
+    install -m755 ${a#*:} /usr/local/bin/$n
+  done'
+```
+
+The new shell takes over at the next login (or reboot). Devices and Services should then show every row
+working except **Notification light** (this phone has none) and **Fingerprint** (not supported).
+To go back, move each `.gsi` file over its program.
+
+## 16. Check it
 
 ```sh
 ssh root@172.16.42.1 'qbootctl | head -5; for r in /sys/class/remoteproc/*; do echo "$(cat $r/name) $(cat $r/state)"; done; ip -br link | grep wlan0; bluetoothctl show | grep Powered
-  id alarm; ls -l /proc/$(pidof ztmetro)/fd | grep -c event3; systemctl --failed --no-legend'
+  id alarm; ls -l /proc/$(pidof ztmetro)/fd | grep -c event3; systemctl --failed --no-legend
+  grep -E "^(sim|registered)=" /run/ztoscorenetworking/status'
 ```
 
 You should see:
@@ -334,7 +372,8 @@ You should see:
 - `Powered: yes`;
 - `alarm` in `video`, `input` and `audio`;
 - `1` (ztMETRO holds the vibration motor);
-- no failed units.
+- no failed units;
+- `sim=absent` without a SIM (`ready` and `registered=home` with one).
 
 Reboot once to confirm everything comes back on its own.
 

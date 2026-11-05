@@ -1,0 +1,13 @@
+[Unit]
+Description=Modem state for the shell, Phone and Messages, from ModemManager (ztoscorenetworkingd's protocol)
+Wants=ModemManager.service
+After=ModemManager.service
+
+[Service]
+ExecStart=/usr/local/sbin/ztos-mm-modemd
+Restart=always
+RestartSec=3
+StateDirectory=ztoscorenetworking
+
+[Install]
+WantedBy=multi-user.target

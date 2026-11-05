@@ -27,7 +27,7 @@ pmaports `b1bc0428`, kernel `linux-postmarketos-qcom-sdm670` 7.2.3. Date 2026-11
 | 12 | Bluetooth: `hci0` set up but no service, no address | bluez not installed; mainline WCN3990 has no public BD address | `bluez bluez-utils`, plus `ztos-bt-addr` (stable `02:…` address hashed from the serial) |
 | 13 | Sensor DSP not served; `/dev/fastrpc-adsp` missing | No `hexagonrpcd`. The device's udev rule was copied to `/vendor/ztos/udev/`, which udev never reads | hexagonrpc v0.4.0 built on the phone, `fastrpc` user, the udev rules in `/etc/udev/rules.d`, `/usr/share/qcom` from pmOS |
 | 14 | No vibration in ztMETRO, though `drv2624:haptics` (`event3`) supports FF_RUMBLE | ztMETRO opens `/dev/input/eventN` itself (`ztmetro.c` `haptics_init`). `event3` is `root:input 0660`, and `alarm` is in `wheel` only: ztConflo's `id alarm \|\| useradd -G wheel,video,input,audio` skips `useradd` because Arch Linux ARM already has `alarm` | `usermod -aG video,input,audio alarm`, plus `70-bonito-haptics.rules` (`uaccess`) |
-| 15 | Flashlight tile does nothing | ztMETRO hard-codes the S9's `/sys/class/leds/white:torch`. Mainline names this LED `white:flash`, and its `brightness` is root-only | `90-bonito-flash.rules` (group `video`). The **shell still needs an upstream fix** to find `white:flash` |
+| 15 | Flashlight tile does nothing | ztMETRO hard-codes the S9's `/sys/class/leds/white:torch`. Mainline names this LED `white:flash`, and its `brightness` is root-only | `90-bonito-flash.rules` (group `video`), and the shell patch in 33 |
 | 16 | `ztos-update-check.service` fails; `pacman -Sy`: `Landlock is not supported by the kernel` → `switching to sandbox user 'alpm' failed` | pacman 7.1's download sandbox needs Landlock; `linux-postmarketos-qcom-sdm670` has `# CONFIG_SECURITY_LANDLOCK is not set` | `DisableSandboxFilesystem` in `/etc/pacman.conf` (better: Landlock in the kernel) |
 | 17 | Every boot: "Vibration motor / Notification light / Core power: did not start", a "Sensor hub failed" dialog, `ztoscorenetworking-modem` restarting forever (binary missing) | The GSI's `/etc/ztoscoresensorframework/components` and enabled units are the Galaxy S9's | A bonito `components` list; `systemctl disable ztoscorenetworking-modem ztoscorenetworking`; the sensor-hub check is hard-coded in ztoscsf, so `tmpfiles.d/ztos-no-sensorhub.conf` creates its "stopped" mark `/run/ztoscsf-sensorhub.stopped` |
 | 18 | ztOSIAL `Display1` shows `Node="auto"`, `MaxLevel=0`; `Haptics1` shows `Device=""` | ztConflo writes `node = "auto"` / `device = "auto"`, but the GSI's `generic.py` takes the value literally (a path / an input name) | Real values in `/vendor/ztos/manifest.toml`. Brightness itself worked already: ztMETRO falls back to `brightnessctl` |
@@ -44,15 +44,21 @@ pmaports `b1bc0428`, kernel `linux-postmarketos-qcom-sdm670` 7.2.3. Date 2026-11
 | 29 | Blurry: never in focus | The lens motor (`lc898219xi`, `focus_absolute` 0–4095) is never moved; the simple pipeline has no AF | Contrast autofocus in ztCamera (coarse and fine sweep). Measured: 0 = infinity, 4095 = nearest (a 40 cm target is sharpest at 4095, forwards and backwards) |
 | 30 | `dma-heap allocation failure` from the ISP's buffers | libcamera uses the first DMA heap it can open; `reserved` here is small | `71-bonito-dma-heap.rules`: `reserved` root-only, so the system heap is used |
 | 31 | After running once, Camera stays black or on its test scene until a reboot | (a) A second libcamera client starting while one streams breaks both ("Failed to setup link … busy"), and CAMSS stays dead until a reboot (rebinding CAMSS or the sensors doesn't help; VFE0 gets 2 interrupts per start). (b) A helper left running after the app was killed kept the camera | A lock (`/tmp/.ztcamera-libcamera.lock`) held by the helper for its lifetime, `PR_SET_PDEATHSIG` so it dies with ztCamera, and a "restart the phone" note after 8 s without frames |
+| 32 | Devices and Services: touch screen, graphics, backlight, battery, charger, vibration, modem and flashlight "missing"; five services "not installed" | `ztdevices` checks the S9's driver names (`s6sy761`, panfrost, `s9p-panel`, `max170xx_battery`, `zrn_*`, `white:torch`) and always lists the S9's own units (`zrn-charge`, `zrn-cpuidle`...) | [patches/ztdevices-any-phone.diff](patches/ztdevices-any-phone.diff): device paths may be patterns, with mainline names beside the S9's; an S9 service that isn't installed is left out. 15 of 17 rows now read "working" (step 15) |
+| 33 | Flashlight tile drawn faint, does nothing (see 15) | `ztmetro.c` writes only `/sys/class/leds/white:torch/brightness`, at Samsung's level 9 | [patches/ztmetro-torch-led.diff](patches/ztmetro-torch-led.diff): the first `*:torch`, then `*:flash` LED, at its `max_brightness` (255: `leds-qcom-flash`'s torch current) (step 15). Checked: the tile switches `white:flash` between 255 and 0 |
+| 34 | Settings: "Samsung Galaxy S9 (SM-G960N starlte)", Exynos 9810, Mali-G72, 3000 mAh, UFS; the big cluster's clock blank and its governor never set | `ztsettings.c` hard-codes the S9, and `cpufreq/policy4` (here the big cluster is `policy6`) | [patches/ztsettings-device-info.diff](patches/ztsettings-device-info.diff): the model from ztOSIAL `Device1.Name`, the rest from `soc0`, the cpufreq policies, the GPU's device tree name, the DSI mode, `charge_full_design` and the root's block device (step 15) |
+| 35 | Status bar, Phone and Messages: no modem at all, though ModemManager has it | ztMETRO, ztPhone and ztMessages talk only to ztoscorenetworkingd (`/run/ztoscorenetworking/status`, its control pipe, its SMS and call logs), which drives only the S9's Samsung modem | `ztos-mm-modemd`: the same protocol, from ModemManager (signal, operator, registration, technology, airplane, data, SMS, calls). Checked without a SIM: `sim=absent`, airplane mode on and off, a refused SMS logged as failed |
 
 ## What still doesn't work
 
-Checked on the phone on 2026-11-04. The hardware works under Linux; what's missing is ztOS userspace.
+Checked on the phone on 2026-11-04 (cellular and flashlight on 2026-11-05). The hardware works under
+Linux; what's missing is ztOS userspace.
 
-- **Cellular (calls, SMS, data):** ModemManager finds the modem over QRTR (`mmcli -L`), but
-  there was no SIM to test (`Card state: 'absent'`). ztMETRO reads only the S9 daemon's
-  `/run/ztoscorenetworking/status`, so it still needs a bridge from ModemManager to that
-  status file and its control pipe. ztOSIAL's `Modem1` already speaks ModemManager.
+- **Cellular (calls, SMS, data):** `ztos-mm-modemd` (fix 35) connects ModemManager to ztMETRO, Phone and
+  Messages, but there was no SIM to test with (ModemManager: `failed: sim-missing`). Signal, SMS, data
+  and calls are untested. **Call audio** isn't routed: nothing sets up the voice path on the modem DSP
+  (pmOS's UCM has a `VoiceCall` verb, but nothing switches to it), so a call may connect without sound.
+  Speaker and mute in the call screen do nothing yet.
 - **Camera:** works (fixes 27–31). Colour and low-light noise are the uncalibrated software ISP's (no
   tuning file for imx363/imx355). Running `cam` or another libcamera program while Camera is open can
   stop the camera until a reboot (fix 31); this is upstream (libcamera simple pipeline / CAMSS).
@@ -60,7 +66,6 @@ Checked on the phone on 2026-11-04. The hardware works under Linux; what's missi
   iio-sensor-proxy, but its mount matrix isn't calibrated yet (flat face-up reads "face-down").
 - **GPS:** no `/dev/gnss*`. The modem's QMI LOC service is up; it needs ModemManager with a
   working modem state and a ztOSIAL `Location1` backend. ztMETRO has no location users yet.
-- **Flashlight tile:** works from the shell only after ztMETRO learns the mainline LED name (fix 15).
 - **45 s boot splash:** ztMETRO waits up to 45 s for Android to be ready, and Android's cold
   boot on this phone takes longer, so the splash always times out.
 - **Not root-caused:** `Atomic commit failed: Device or resource busy` on DSI-1, a few

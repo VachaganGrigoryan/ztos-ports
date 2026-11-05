@@ -12,7 +12,7 @@ ztOS GSI 0.2.1, kernel `linux-postmarketos-qcom-sdm670` 7.2.3 (mainline).
 
 | Works | Partly | Doesn't work in ztOS yet | Not tried |
 |---|---|---|---|
-| Boot from internal storage, panel, GPU (Adreno 615, GLES 3.2), touch, ztMETRO, Wi-Fi (2.4 and 5 GHz), Bluetooth (scan), USB networking, speaker (with boost), microphone, vibration, brightness control and auto brightness, light, accelerometer and proximity sensors, battery and charging readout, CPU frequency scaling, A/B slot marking, software updates, Waydroid (starts at login, freezes when idle) | Cameras, back and front (1280×960, autofocus, digital zoom; uncalibrated colour, noisy in dim light); flash LED: works, but ztMETRO's tile looks for the S9's LED name; modem: ModemManager sees it, untested without a SIM | Calls, SMS, mobile data in the ztOS UI (its modem service is S9-only); GPS; screen rotation (ztMETRO has none) | Headphones, headset mic, suspend |
+| Boot from internal storage, panel, GPU (Adreno 615, GLES 3.2), touch, ztMETRO, Wi-Fi (2.4 and 5 GHz), Bluetooth (scan), USB networking, speaker (with boost), microphone, vibration, brightness control and auto brightness, light, accelerometer and proximity sensors, battery and charging readout, CPU frequency scaling, A/B slot marking, software updates, Waydroid (starts at login, freezes when idle), flashlight tile, Devices and Services and Settings describing this phone | Cameras, back and front (1280×960, autofocus, digital zoom; uncalibrated colour, noisy in dim light); calls, SMS and mobile data: ModemManager bridged to ztMETRO, Phone and Messages, untested without a SIM, no call audio | GPS; screen rotation (ztMETRO has none) | Headphones, headset mic, suspend |
 
 ## Install
 
@@ -20,7 +20,7 @@ ztOS GSI 0.2.1, kernel `linux-postmarketos-qcom-sdm670` 7.2.3 (mainline).
 
 ## What was fixed
 
-**→ [FIXES.md](FIXES.md)**: 31 problems, each with its symptom, cause and fix. In short:
+**→ [FIXES.md](FIXES.md)**: 35 problems, each with its symptom, cause and fix. In short:
 
 - **ztConflo:**
   - doesn't pick a kernel variant or device tree for this two-panel phone;
@@ -30,7 +30,8 @@ ztOS GSI 0.2.1, kernel `linux-postmarketos-qcom-sdm670` 7.2.3 (mainline).
   - writes `"auto"` into the ztOSIAL manifest, which the GSI reads literally.
 - **ztOS:**
   - the GSI's `/etc/fstab` makes the postmarketOS initramfs halt;
-  - ships the Galaxy S9's component list, torch name and modem daemons.
+  - ships the Galaxy S9's component list, torch name and modem daemons;
+  - its Devices and Services and Settings apps describe the S9, whatever phone they run on.
 - **Kernel:** no Landlock, so pacman 7 can't download updates.
 - **Sensors, speaker, Android:** the sensor DSP needed its file root, iio-sensor-proxy tags and an auto-brightness stand-in for the S9 daemon; the speaker amps' boost was off; ztOS's Waydroid helpers were never installed.
 - **Phone:**
@@ -43,9 +44,12 @@ ztOS GSI 0.2.1, kernel `linux-postmarketos-qcom-sdm670` 7.2.3 (mainline).
 |---|---|
 | `INSTALL.md` | The installation guide |
 | `FIXES.md` | Symptom, cause and fix for every problem |
-| `files/` | Files installed on the phone, laid out from `/`: systemd units, the Bluetooth address helper, udev rules, NetworkManager and ld.so config, the ztoscsf component list, and the auto-brightness daemon |
+| `files/` | Files installed on the phone, laid out from `/`: systemd units, the Bluetooth address helper, udev rules, NetworkManager and ld.so config, the ztoscsf component list, the auto-brightness daemon, and the ModemManager bridge `ztos-mm-modemd` |
 | `patches/ztconflo-kernel-variant.diff` | Lets ztConflo take the kernel variant from `$ZT_KERNEL` |
 | `patches/ztcamera-libcamera.diff` | Gives ztCamera both cameras through libcamera, with autofocus and 1×/2×/4× zoom (INSTALL.md step 14) |
+| `patches/ztdevices-any-phone.diff` | Lets Devices and Services find any phone's hardware, not only the S9's (INSTALL.md step 15) |
+| `patches/ztsettings-device-info.diff` | Shows this phone's model, SoC, CPU clusters, GPU, panel, battery and storage in Settings (step 15) |
+| `patches/ztmetro-torch-led.diff` | Lets the flashlight tile use a mainline `*:torch` or `*:flash` LED (step 15) |
 | `patches/ztos-waydroid-boot.diff` | Keeps Android from being frozen while it boots, and lets `ztos-waydroid-boot` set its ready mark (applied in INSTALL.md step 13) |
 
 ## Upstream reports

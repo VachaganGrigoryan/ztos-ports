@@ -11,4 +11,6 @@ unit|hexagonrpcd-adsp-rootpd.service||ADSP FastRPC (root)
 unit|hexagonrpcd-adsp-sensorspd.service||Sensor DSP (FastRPC)
 unit|bluetooth.service||Bluetooth
 unit|zrnperfd.service||Performance
+unit|ztos-ssc-sensord.service||Auto brightness
+unit|ztos-mm-modemd.service||Mobile network (ModemManager)
 session|ztapps||App list

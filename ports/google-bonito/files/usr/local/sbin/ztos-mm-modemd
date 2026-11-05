@@ -1,0 +1,596 @@
+#!/usr/bin/env python3
+"""ztos-mm-modemd: the modem for ztMETRO, Phone and Messages, through ModemManager.
+
+It stands in for ztOS's ztoscorenetworkingd, which drives only the Galaxy S9's Samsung
+modem (AT and IPC on /dev/umts_*), and speaks the same protocol
+(ztmetro/modemd/ztoscorenetworkingd.c, ztmetro/comm/comm.h):
+
+  /run/ztoscorenetworking/status   key=value lines: sim, operator, bars, registered,
+                                   tech, airplane, data, data_on, ip, wifi_bars, call...
+  /run/ztoscorenetworking.ctl      a FIFO anyone may write lines to:
+                                   airplane on|off, data on|off, sms|smse NUMBER TEXT,
+                                   call NUMBER, answer, hangup, dtmf KEY, refresh
+                                   (mute, speaker, screen, apn: taken, nothing to do)
+  /var/lib/ztoscorenetworking/sms/log   in|out <time> <number> <text|ok|failed>
+  /var/lib/ztoscorenetworking/calls     out|in|missed <time> <number> <seconds>
+  "modem", "notify APP|TITLE|TEXT", "call_screen [end]", "screen on"
+                                   down /run/user/*/ztmetro.ctl
+
+Call audio is not routed here: a call may connect without sound.
+`ztos-mm-modemd --self-test` checks the mappings and the control lines.
+"""
+
+import glob
+import os
+import subprocess
+import sys
+import threading
+import time
+
+STATUS_DIR = "/run/ztoscorenetworking"
+STATUS = STATUS_DIR + "/status"
+CTL = "/run/ztoscorenetworking.ctl"
+STATE = "/var/lib/ztoscorenetworking"
+SMS_LOG = STATE + "/sms/log"
+CALL_LOG = STATE + "/calls"
+DATA_WISH = STATE + "/data_on"
+APN_FILE = "/etc/ztoscorenetworking/apn"
+APNS_FILE = "/usr/share/ztoscorenetworking/apns"
+PERIOD_S = 2
+WIFI_S = 10
+
+# ---- pure mappings (checked by --self-test) -------------------------------------
+
+
+def bars_of(percent):
+    """ModemManager's signal quality (0..100 %) as the shell's 0..5 bars."""
+    if percent <= 0:
+        return 0
+    return min(5, 1 + percent * 5 // 100)
+
+
+def tech_of(flags, lte, hspa_plus, hspa, umts, edge, gprs):
+    """The data icon for MM's access technology flags (the bit values passed in)."""
+    for bit, name in (
+        (lte, "4G"),
+        (hspa_plus, "H+"),
+        (hspa, "H"),
+        (umts, "3G"),
+        (edge, "E"),
+        (gprs, "G"),
+    ):
+        if flags & bit:
+            return name
+    return ""
+
+
+def registered_of(name):
+    """MM's 3GPP registration state name (HOME, ROAMING_SMS_ONLY...) as the status word."""
+    for prefix, word in (
+        ("HOME", "home"),
+        ("ROAMING", "roaming"),
+        ("SEARCHING", "searching"),
+        ("DENIED", "denied"),
+    ):
+        if name.startswith(prefix):
+            return word
+    return "none"
+
+
+def sim_of(state, failed_reason, unlock):
+    """sim= for MM's modem state, failure reason and the unlock it waits for."""
+    if state == "FAILED":
+        return "absent" if failed_reason == "SIM_MISSING" else "error"
+    if state == "LOCKED":
+        return "puk" if "PUK" in unlock else "pin"
+    if state in ("UNKNOWN", "INITIALIZING"):
+        return "?"
+    return "ready"
+
+
+def wifi_bars_of(iw_link):
+    """-1 without a link, else 0..3 from `iw dev W link`'s signal (dBm), as ztoscorenetworkingd."""
+    for line in iw_link.splitlines():
+        words = line.split()
+        if words[:1] == ["signal:"] and len(words) > 1:
+            dbm = int(words[1])
+            return 3 if dbm >= -60 else 2 if dbm >= -72 else 1 if dbm >= -82 else 0
+    return 3 if iw_link.startswith("Connected") else -1
+
+
+def escape(text):
+    """A message as one log field, as ztoscorenetworkingd writes it."""
+    out = []
+    for c in text:
+        out.append(
+            "\\n" if c == "\n" else "\\\\" if c == "\\" else " " if c in "\r\t" else c
+        )
+    return "".join(out)
+
+
+def unescape(text):
+    """smse's text: \\n, \\t and \\\\ back to what they stand for."""
+    out, i = [], 0
+    while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text):
+            i += 1
+            out.append({"n": "\n", "t": "\t"}.get(text[i], text[i]))
+        else:
+            out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def parse(line):
+    """A control line as (command, args) or None."""
+    line = line.strip()
+    for word in ("airplane", "data", "mute", "speaker", "screen"):
+        if line in (word + " on", word + " off"):
+            return word, (line.endswith(" on"),)
+    if line in ("answer", "hangup", "refresh", "apn"):
+        return line, ()
+    head, _, rest = line.partition(" ")
+    if head in ("sms", "smse"):
+        number, _, text = rest.partition(" ")
+        if number and text:
+            return "sms", (number, unescape(text) if head == "smse" else text)
+    if head == "call" and rest and all(c in "0123456789+*#" for c in rest):
+        return "call", (rest,)
+    if head == "dtmf" and len(rest) == 1 and rest in "0123456789*#":
+        return "dtmf", (rest,)
+    return None
+
+
+def status_text(s):
+    keys = (
+        "call_result",
+        "call",
+        "call_number",
+        "sim",
+        "operator",
+        "bars",
+        "registered",
+        "tech",
+        "airplane",
+        "data",
+        "data_on",
+        "ip",
+        "wifi_bars",
+        "ipc",
+        "ipc_last_rx",
+    )
+    return "".join(f"{k}={s[k]}\n" for k in keys)
+
+
+def apn_for(mccmnc, apns_text):
+    """The APN for a SIM's MCC+MNC (a 3-digit MNC first, then 2)."""
+    for digits in (6, 5):
+        code = mccmnc[:digits]
+        for line in apns_text.splitlines():
+            if len(code) == digits and line.startswith(code + " "):
+                return line[len(code) + 1 :].strip()
+    return ""
+
+
+def self_test():
+    assert [bars_of(p) for p in (0, 1, 19, 20, 50, 99, 100)] == [0, 1, 1, 2, 3, 5, 5]
+    assert tech_of(0x4000, 0x4000, 0x800, 0x400, 0x20, 0x10, 0x8) == "4G"
+    assert tech_of(0x20 | 0x8, 0x4000, 0x800, 0x400, 0x20, 0x10, 0x8) == "3G"
+    assert tech_of(0, 1, 2, 4, 8, 16, 32) == ""
+    assert [
+        registered_of(n)
+        for n in ("HOME", "ROAMING_SMS_ONLY", "SEARCHING", "DENIED", "IDLE")
+    ] == ["home", "roaming", "searching", "denied", "none"]
+    assert sim_of("FAILED", "SIM_MISSING", "") == "absent"
+    assert sim_of("LOCKED", "NONE", "SIM_PUK") == "puk"
+    assert sim_of("LOCKED", "NONE", "SIM_PIN") == "pin"
+    assert sim_of("REGISTERED", "NONE", "NONE") == "ready"
+    assert wifi_bars_of("Not connected.\n") == -1
+    assert (
+        wifi_bars_of("Connected to aa:bb (on wlan0)\n\tSSID: x\n\tsignal: -59 dBm\n")
+        == 3
+    )
+    assert wifi_bars_of("Connected to aa:bb (on wlan0)\n\tsignal: -80 dBm\n") == 1
+    assert escape("a\nb\\c\td") == "a\\nb\\\\c d"
+    assert unescape(escape("a\nb\\c")) == "a\nb\\c"
+    assert parse("airplane on") == ("airplane", (True,))
+    assert parse("data off") == ("data", (False,))
+    assert parse("sms +3741 hello there") == ("sms", ("+3741", "hello there"))
+    assert parse("smse 123 two\\nlines") == ("sms", ("123", "two\nlines"))
+    assert parse("call +1*2#") == ("call", ("+1*2#",))
+    assert parse("call 1; reboot") is None
+    assert parse("dtmf 5") == ("dtmf", ("5",)) and parse("dtmf x") is None
+    assert parse("sms 123") is None and parse("bogus") is None
+    assert apn_for("283010", "# x\n28301 internet\n283010 ucom\n") == "ucom"
+    assert (
+        apn_for("28301", "28301 internet\n") == "internet"
+        and apn_for("", "0 x\n") == ""
+    )
+    s = status_text(
+        dict.fromkeys(
+            (
+                "call_result",
+                "call",
+                "call_number",
+                "sim",
+                "operator",
+                "bars",
+                "registered",
+                "tech",
+                "airplane",
+                "data",
+                "data_on",
+                "ip",
+                "wifi_bars",
+                "ipc",
+                "ipc_last_rx",
+            ),
+            "x",
+        )
+    )
+    assert s.startswith("call_result=x\ncall=x\n") and s.count("\n") == 15
+    print("ztos-mm-modemd: self-test passed")
+
+
+# ---- the daemon ----------------------------------------------------------------
+
+
+def log_line(path, line):
+    """Appended and synced: it may be the only copy of a message."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as f:
+        f.write(line)
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(path, 0o644)
+
+
+def tell_shell(line):
+    for path in glob.glob("/run/user/*/ztmetro.ctl"):
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError:
+            continue
+        try:
+            os.write(fd, line.encode())
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return default
+
+
+class Bridge:
+    def __init__(self, mm, gio, glib):
+        self.MM, self.Gio, self.GLib = mm, gio, glib
+        conn = gio.bus_get_sync(gio.BusType.SYSTEM, None)
+        self.manager = mm.Manager.new_sync(
+            conn, gio.DBusObjectManagerClientFlags.DO_NOT_AUTO_START, None
+        )
+        self.lock = threading.Lock()
+        self.written = None
+        self.call_result = ""
+        self.call = None  # path, state word, number, since, answered_at, incoming
+        os.makedirs(STATE + "/sms", exist_ok=True)
+        self.data_on = read(DATA_WISH).strip() == "1"
+        self.wifi, self.wifi_at = -1, -WIFI_S
+
+    def wifi_bars(self):
+        """`iw` at most every WIFI_S: the shell's Wi-Fi icon needs no more."""
+        if time.monotonic() - self.wifi_at >= WIFI_S:
+            self.wifi_at = time.monotonic()
+            out = ""
+            for dev in glob.glob("/sys/class/net/w*"):
+                run = subprocess.run(
+                    ["iw", "dev", os.path.basename(dev), "link"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                out = out or (run.stdout if run.stdout.startswith("Connected") else "")
+            self.wifi = wifi_bars_of(out)
+        return self.wifi
+
+    def modem(self):
+        objects = self.manager.get_objects()
+        return objects[0] if objects else None
+
+    def publish(self, s):
+        text = status_text(s)
+        if text == self.written:
+            return
+        os.makedirs(STATUS_DIR, exist_ok=True)
+        with open(STATUS + ".new", "w") as f:
+            f.write(text)
+        os.chmod(STATUS + ".new", 0o644)
+        os.replace(STATUS + ".new", STATUS)
+        self.written = text
+        tell_shell("modem\n")
+
+    # AttributeError: an interface ModemManager does not offer in this state (no SIM: no Simple, no Messaging)
+    def tick(self):
+        with self.lock:
+            try:
+                self.poll()
+            # ModemManager went away for a moment: the next tick tries again
+            except (self.GLib.Error, OSError, AttributeError) as e:
+                print(f"ztos-mm-modemd: {e}", file=sys.stderr)
+        return True
+
+    def poll(self):
+        MM = self.MM
+        s = {
+            "call_result": self.call_result,
+            "call": "idle",
+            "call_number": "",
+            "sim": "?",
+            "operator": "",
+            "bars": -1,
+            "registered": "none",
+            "tech": "",
+            "airplane": 0,
+            "data": 0,
+            "data_on": int(self.data_on),
+            "ip": "",
+            "wifi_bars": self.wifi_bars(),
+            "ipc": "?",
+            "ipc_last_rx": 0,
+        }
+        obj = self.modem()
+        if obj:
+            m = obj.get_modem()
+            state = m.get_state().value_nick.upper().replace("-", "_")
+            reason = m.get_state_failed_reason().value_nick.upper().replace("-", "_")
+            unlock = m.get_unlock_required().value_nick.upper().replace("-", "_")
+            s["sim"] = sim_of(state, reason, unlock)
+            s["bars"] = bars_of(m.get_signal_quality()[0])
+            T = MM.ModemAccessTechnology
+            s["tech"] = tech_of(
+                int(m.get_access_technologies()),
+                int(T.LTE),
+                int(T.HSPA_PLUS),
+                int(T.HSPA),
+                int(T.UMTS),
+                int(T.EDGE),
+                int(T.GPRS),
+            )
+            s["airplane"] = int(m.get_power_state() == MM.ModemPowerState.LOW)
+            g = obj.get_modem_3gpp()
+            if g:
+                s["registered"] = registered_of(
+                    g.get_registration_state().value_nick.upper().replace("-", "_")
+                )
+                s["operator"] = (g.get_operator_name() or "").replace("\n", " ")
+            for b in (
+                m.list_bearers_sync(None)
+                if state in ("CONNECTED", "REGISTERED")
+                else []
+            ):
+                if b.get_connected():
+                    s["data"] = 1
+                    ip4 = b.get_ipv4_config()
+                    s["ip"] = (ip4.get_address() if ip4 else "") or ""
+            self.poll_messages(obj)
+            self.poll_calls(obj, s)
+        if self.call:
+            s["call"], s["call_number"] = self.call["state"], self.call["number"]
+        s["call_result"] = self.call_result
+        self.publish(s)
+
+    def poll_messages(self, obj):
+        messaging = obj.get_modem_messaging()
+        if not messaging:
+            return
+        for sms in messaging.list_sync(None):
+            if sms.get_state() != self.MM.SmsState.RECEIVED:
+                continue
+            number, text = sms.get_number() or "unknown", sms.get_text() or ""
+            log_line(SMS_LOG, f"in\t{int(time.time())}\t{number}\t{escape(text)}\n")
+            banner = "".join(
+                " " if c in "\n\r\t" else "/" if c == "|" else c for c in text
+            )[:240]
+            # shortcut: the banner names the number, not the contact (ztoscorenetworkingd's sms_who); add it if missed
+            tell_shell(f"notify Messaging|{number}|{banner}\n")
+            messaging.delete_sync(sms.get_path(), None)
+
+    def poll_calls(self, obj, s):
+        voice = obj.get_modem_voice()
+        calls = voice.list_calls_sync(None) if voice else []
+        CS = self.MM.CallState
+        words = {
+            CS.DIALING: "dialing",
+            CS.RINGING_OUT: "ringing",
+            CS.RINGING_IN: "incoming",
+            CS.WAITING: "incoming",
+            CS.ACTIVE: "active",
+            CS.HELD: "active",
+        }
+        live = [c for c in calls if c.get_state() in words]
+        if live:
+            c = live[0]
+            word = words[c.get_state()]
+            if not self.call or self.call["path"] != c.get_path():
+                incoming = c.get_direction() == self.MM.CallDirection.INCOMING
+                self.call = {
+                    "path": c.get_path(),
+                    "state": word,
+                    "number": c.get_number() or "",
+                    "since": time.time(),
+                    "answered_at": 0,
+                    "incoming": incoming,
+                }
+                self.call_result = ""
+                if incoming:
+                    tell_shell("screen on\n")
+                    tell_shell("call_screen\n")
+            if word == "active" and not self.call["answered_at"]:
+                self.call["answered_at"] = time.time()
+            self.call["state"] = word
+        elif self.call:
+            self.end_call()
+        for c in calls:
+            if c.get_state() == CS.TERMINATED:
+                voice.delete_call_sync(c.get_path(), None)
+
+    def end_call(self):
+        c, self.call = self.call, None
+        self.call_result = self.call_result or "ended"
+        tell_shell("call_screen end\n")
+        kind = "out" if not c["incoming"] else "in" if c["answered_at"] else "missed"
+        lasted = int(time.time() - c["answered_at"]) if c["answered_at"] else 0
+        log_line(
+            CALL_LOG,
+            f"{kind}\t{int(c['since'])}\t{c['number'] or 'unknown'}\t{lasted}\n",
+        )
+        if kind == "missed":
+            tell_shell(f"notify Phone|Missed call|{c['number'] or 'Unknown number'}\n")
+
+    # -- what is asked on the control pipe
+
+    def command(self, line):
+        asked = parse(line)
+        if not asked:
+            return
+        what, args = asked
+        print(f"ztos-mm-modemd: asked: {what}", file=sys.stderr)
+        if what in ("data", "sms", "airplane"):
+            # these wait on the network: off the main loop, so a hangup is never held up
+            threading.Thread(target=self.slow, args=(what, args), daemon=True).start()
+        else:
+            with self.lock:
+                self.fast(what, args)
+
+    def fast(self, what, args):
+        obj = self.modem()
+        voice = obj.get_modem_voice() if obj else None
+        if what == "refresh":
+            self.written = None
+        elif what == "call" and voice and not self.call:
+            props = self.MM.CallProperties.new()
+            props.set_number(args[0])
+            call = voice.create_call_sync(props, None)
+            self.call = {
+                "path": call.get_path(),
+                "state": "dialing",
+                "number": args[0],
+                "since": time.time(),
+                "answered_at": 0,
+                "incoming": False,
+            }
+            self.call_result = ""
+            call.start_sync(None)
+        elif what in ("answer", "hangup", "dtmf") and voice:
+            for c in voice.list_calls_sync(None):
+                state = c.get_state()
+                if what == "answer" and state == self.MM.CallState.RINGING_IN:
+                    c.accept_sync(None)
+                elif what == "hangup" and state != self.MM.CallState.TERMINATED:
+                    c.hangup_sync(None)
+                elif what == "dtmf" and state == self.MM.CallState.ACTIVE:
+                    c.send_dtmf_sync(args[0], None)
+        self.poll()
+
+    def slow(self, what, args):
+        try:
+            if what == "sms":
+                self.send_sms(*args)
+            elif what == "data":
+                self.set_data(args[0])
+            elif what == "airplane":
+                self.set_airplane(args[0])
+        except (self.GLib.Error, OSError, AttributeError) as e:
+            print(f"ztos-mm-modemd: {what}: {e}", file=sys.stderr)
+        self.GLib.idle_add(lambda: self.tick() and False)  # once
+
+    def send_sms(self, number, text):
+        ok = False
+        try:
+            messaging = self.modem().get_modem_messaging()
+            props = self.MM.SmsProperties.new()
+            props.set_number(number)
+            props.set_text(text)
+            sms = messaging.create_sync(props, None)
+            sms.send_sync(None)
+            messaging.delete_sync(sms.get_path(), None)
+            ok = True
+        finally:
+            log_line(
+                SMS_LOG,
+                f"out\t{int(time.time())}\t{number}\t{'ok' if ok else 'failed'}\n",
+            )
+
+    def set_data(self, on):
+        self.data_on = on
+        with open(DATA_WISH, "w") as f:
+            f.write("1\n" if on else "0\n")
+        simple = self.modem().get_modem_simple()
+        if not on:
+            simple.disconnect_sync(None, None)
+            return
+        props = self.MM.SimpleConnectProperties.new()
+        props.set_apn(self.apn())
+        simple.connect_sync(props, None)
+
+    def apn(self):
+        for line in read(APN_FILE).splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "apn" and value.strip():
+                return value.strip()
+        sim = self.modem().get_modem().get_sim_sync(None)
+        return apn_for(sim.get_operator_identifier() or "", read(APNS_FILE))
+
+    def set_airplane(self, on):
+        m = self.modem().get_modem()
+        if on:
+            if m.get_state() >= self.MM.ModemState.ENABLED:
+                m.disable_sync(None)
+            m.set_power_state_sync(self.MM.ModemPowerState.LOW, None)
+        else:
+            m.set_power_state_sync(self.MM.ModemPowerState.ON, None)
+            if m.get_state() == self.MM.ModemState.DISABLED:
+                m.enable_sync(None)
+
+    def ctl_readable(self, fd, _cond):
+        self.buf = getattr(self, "buf", b"") + os.read(fd, 4096)
+        *lines, self.buf = self.buf.split(b"\n")
+        for line in lines:
+            try:
+                self.command(line.decode(errors="replace"))
+            except (self.GLib.Error, OSError, AttributeError) as e:
+                print(f"ztos-mm-modemd: {line[:20]!r}: {e}", file=sys.stderr)
+        return True
+
+
+def main():
+    import gi
+
+    gi.require_version("ModemManager", "1.0")
+    from gi.repository import Gio, GLib
+    from gi.repository import ModemManager as MM
+
+    bridge = Bridge(MM, Gio, GLib)
+    if os.path.lexists(CTL):
+        os.unlink(CTL)
+    os.mkfifo(CTL, 0o666)
+    os.chmod(CTL, 0o666)
+    fd = os.open(
+        CTL, os.O_RDWR | os.O_NONBLOCK
+    )  # read-write: no EOF when a writer leaves
+    GLib.io_add_watch(fd, GLib.IO_IN, bridge.ctl_readable)
+    bridge.tick()
+    GLib.timeout_add_seconds(PERIOD_S, bridge.tick)
+    GLib.MainLoop().run()
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        self_test()
+    else:
+        main()
