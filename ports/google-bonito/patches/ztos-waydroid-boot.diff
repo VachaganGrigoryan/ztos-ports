@@ -1,6 +1,6 @@
---- a/ztos-waydroid-boot	2026-11-04 22:55:40
-+++ b/ztos-waydroid-boot	2026-11-04 22:55:40
-@@ -24,9 +24,15 @@
+--- a/ztos-waydroid-boot	2026-11-08 22:57:24
++++ b/ztos-waydroid-boot	2026-11-08 22:57:34
+@@ -24,13 +24,18 @@
  	exit 0
  fi
  
@@ -15,7 +15,11 @@
 +ready=$?
 +rm -f "$launching"
 +if (( ready == 0 )); then
-+	sudo -n /usr/bin/touch "$marker"   # /run is root's; ztOS's sudoers allows touch
  	if ! ztos-waydroid-power idle; then
  		logger -t ztos-waydroid-boot 'Android ready; idle freeze deferred to normal policy'
  	fi
+-	logger -t ztos-waydroid-boot 'Android ready; boot marker set'
++	logger -t ztos-waydroid-boot 'Android ready; boot marker set by ztos-waydroid-recover'
+ else
+ 	logger -t ztos-waydroid-boot 'Android not ready within 45 seconds; continuing boot'
+ fi

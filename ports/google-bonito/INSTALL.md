@@ -263,6 +263,7 @@ ssh root@172.16.42.1 '
   $U systemctl --user restart pipewire pipewire-pulse wireplumber
   sleep 3; $U wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.60'
 ssh root@172.16.42.1 'patch /usr/local/libexec/ztos-waydroid-boot' < patches/ztos-waydroid-boot.diff
+ssh root@172.16.42.1 'patch /usr/local/libexec/ztos-waydroid-recover' < patches/ztos-waydroid-recover.diff
 ```
 
 | What | Why |
@@ -272,7 +273,7 @@ ssh root@172.16.42.1 'patch /usr/local/libexec/ztos-waydroid-boot' < patches/zto
 | iio-sensor-proxy + libssc | Reads the light, accelerometer and proximity sensors from the sensor DSP (`monitor-sensor`) |
 | libcamera | Both cameras through the software ISP: `cam -l`, `cam -c1 -C30 -F/tmp/f#.ppm -s pixelformat=RGB888,width=1280,height=720` |
 | The Waydroid helpers | ztMETRO runs `ztos-waydroid-power` at every screen-off and app switch, but nothing in the GSI installs it (only `install.sh`, which also rebuilds Android's image). Without it Android never sleeps or freezes. This installs only the helpers, units and sudoers rule |
-| `ztos-waydroid-boot.diff` | Holds the launcher's mark while Android boots, so ztMETRO's "idle" doesn't freeze it half-way; creates the boot mark with `sudo touch`, since `/run` is root's |
+| `ztos-waydroid-boot.diff`, `ztos-waydroid-recover.diff` | Holds the launcher's mark while Android boots, so ztMETRO's "idle" doesn't freeze it half-way. The boot mark goes to `/run`, which is root's, so `ztos-waydroid-recover ready` (root, through the sudoers rule) writes it |
 | `60-bonito-speaker-loudness.conf` + swh-plugins | Louder speaker the way Android does it: +8 dB into a look-ahead limiter (peaks stay under −1 dBFS). A WirePlumber smart filter in front of the speaker sink only, so headphones bypass it. It's in the user's PipeWire config, so `ztos-speaker-boost` (the volume keys past 30, step 15) can add a high-pass (up to 600 Hz) and more gain into it and a second limiter, without root or a restart. Delete it and restart pipewire to switch the filter off |
 | Speaker boost | The CS35L36 amps start with their boost converter off, so the speaker runs straight off the battery and is quiet. The device tree sets the boost (10 V, 2.6 A) as Android does. Analog gain is at its maximum, 19. The built-in mic: PipeWire drives `ADC1 Capture Volume` as the mic's hardware volume, and at 100% it is 63 (max) and clips; 0.60 gives the UCM's 45, and WirePlumber keeps it |
 
