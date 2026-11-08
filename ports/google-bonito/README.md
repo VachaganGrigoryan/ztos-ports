@@ -50,7 +50,7 @@ ztOS GSI 0.2.1, kernel `linux-postmarketos-qcom-sdm670` 7.2.3 (mainline).
 | `patches/ztdevices-any-phone.diff` | Lets Devices and Services find any phone's hardware, not only the S9's (INSTALL.md step 15) |
 | `patches/ztsettings-device-info.diff` | Shows this phone's model, SoC, CPU clusters, GPU, panel, battery and storage in Settings (step 15) |
 | `patches/ztmetro-torch-led.diff` | Lets the flashlight tile use a mainline `*:torch` or `*:flash` LED (step 15) |
-| `patches/ztos-waydroid-boot.diff` | Keeps Android from being frozen while it boots, and lets `ztos-waydroid-boot` set its ready mark (applied in INSTALL.md step 13) |
+| `patches/ztos-waydroid-boot.diff`, `patches/ztos-waydroid-recover.diff` | Keeps Android from being frozen while it boots; `ztos-waydroid-recover ready` sets the boot's ready mark (applied in INSTALL.md step 13) |
 
 ## Upstream reports
 
